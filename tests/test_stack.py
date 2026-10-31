@@ -82,6 +82,22 @@ def test_expired_job_is_recovered_and_reclaimed(
 
     assert queue.recover_stale_jobs(30) == 1
 
+    # A recovered job must wait for its retry delay.
+    assert queue.claim(lease_seconds=30) is None
+
+    # Move its availability into the past for a deterministic test.
+    with queue.connect() as db:
+        db.execute(
+            "UPDATE jobs SET available_at=? WHERE id=?",
+            (
+                (
+                    datetime.now(timezone.utc)
+                    - timedelta(seconds=1)
+                ).isoformat(),
+                job_id,
+            ),
+        )
+
     second = queue.claim(lease_seconds=30)
 
     assert second["id"] == job_id
@@ -95,6 +111,60 @@ def test_expired_job_is_recovered_and_reclaimed(
     assert queue.finish(
         job_id, {"ok": True}, second["lease_token"]
     ) is True
+
+
+
+def test_retry_delay_uses_exponential_backoff_and_cap(monkeypatch):
+    monkeypatch.setattr(queue, "RETRY_BASE_SECONDS", 5)
+    monkeypatch.setattr(queue, "RETRY_MAX_SECONDS", 12)
+
+    assert queue.retry_delay(1) == 5
+    assert queue.retry_delay(2) == 10
+    assert queue.retry_delay(3) == 12
+    assert queue.retry_delay(4) == 12
+
+
+def test_claim_respects_available_at(tmp_path, monkeypatch):
+    monkeypatch.setattr(queue, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(
+        queue, "DB_PATH", tmp_path / "jobs.sqlite3"
+    )
+
+    job_id = queue.enqueue("hello", {}, 2)
+
+    with queue.connect() as db:
+        row = db.execute(
+            "SELECT created_at, available_at FROM jobs WHERE id=?",
+            (job_id,),
+        ).fetchone()
+
+        assert row["available_at"] == row["created_at"]
+
+        future = (
+            datetime.now(timezone.utc) + timedelta(minutes=1)
+        ).isoformat()
+
+        db.execute(
+            "UPDATE jobs SET available_at=? WHERE id=?",
+            (future, job_id),
+        )
+
+    assert queue.claim() is None
+
+    with queue.connect() as db:
+        past = (
+            datetime.now(timezone.utc) - timedelta(seconds=1)
+        ).isoformat()
+
+        db.execute(
+            "UPDATE jobs SET available_at=? WHERE id=?",
+            (past, job_id),
+        )
+
+    job = queue.claim()
+
+    assert job is not None
+    assert job["id"] == job_id
 
 
 def test_expired_job_exhausts_attempts(

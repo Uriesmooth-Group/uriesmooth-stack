@@ -10,3 +10,5 @@ DB_PATH = DATA_DIR / "jobs.sqlite3"
 POLL_SECONDS = max(1, int(os.environ.get("ALPHAURIEL_POLL_SECONDS", "3")))
 MAX_ATTEMPTS = max(1, int(os.environ.get("ALPHAURIEL_MAX_ATTEMPTS", "3")))
 LEASE_SECONDS = max(30, int(os.environ.get("ALPHAURIEL_LEASE_SECONDS", "600")))
+RETRY_BASE_SECONDS = max(1, int(os.environ.get("ALPHAURIEL_RETRY_BASE_SECONDS", "5")))
+RETRY_MAX_SECONDS = max(RETRY_BASE_SECONDS, int(os.environ.get("ALPHAURIEL_RETRY_MAX_SECONDS", "300")))

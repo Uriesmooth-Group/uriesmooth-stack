@@ -4,11 +4,29 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone, timedelta
 
-from .config import DATA_DIR, DB_PATH
+from .config import (
+    DATA_DIR,
+    DB_PATH,
+    RETRY_BASE_SECONDS,
+    RETRY_MAX_SECONDS,
+)
 
 
 def now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def retry_delay(attempts):
+    delay = RETRY_BASE_SECONDS
+    maximum = RETRY_MAX_SECONDS
+
+    for _ in range(max(0, int(attempts) - 1)):
+        if delay >= maximum / 2:
+            return maximum
+        delay *= 2
+
+    return min(delay, maximum)
+
 
 def connect():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -32,7 +50,8 @@ def connect():
             updated_at TEXT NOT NULL,
             result TEXT,
             error TEXT,
-            lease_token TEXT
+            lease_token TEXT,
+            available_at TEXT
         )
         """
     )
@@ -46,6 +65,26 @@ def connect():
         db.execute(
             "ALTER TABLE jobs ADD COLUMN lease_token TEXT"
         )
+
+    if "available_at" not in columns:
+        db.execute(
+            "ALTER TABLE jobs ADD COLUMN available_at TEXT"
+        )
+
+    db.execute(
+        "UPDATE jobs SET available_at=created_at "
+        "WHERE available_at IS NULL"
+    )
+
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_jobs_pending_available "
+        "ON jobs(status, available_at, created_at)"
+    )
+
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_jobs_status_updated "
+        "ON jobs(status, updated_at)"
+    )
 
     db.commit()
     return db
@@ -64,15 +103,16 @@ def enqueue(app_name, payload=None, max_attempts=3):
             INSERT INTO jobs (
                 id, app_name, payload, status,
                 attempts, max_attempts,
-                created_at, updated_at
+                created_at, updated_at, available_at
             )
-            VALUES (?, ?, ?, 'pending', 0, ?, ?, ?)
+            VALUES (?, ?, ?, 'pending', 0, ?, ?, ?, ?)
             """,
             (
                 job_id,
                 app_name,
                 json.dumps(payload or {}),
                 max_attempts,
+                stamp,
                 stamp,
                 stamp,
             ),
@@ -106,10 +146,20 @@ def recover_stale_jobs(lease_seconds=600):
         ).fetchall()
 
         for row in rows:
+            stamp = now()
             status = (
                 "pending"
                 if row["attempts"] < row["max_attempts"]
                 else "failed"
+            )
+
+            available_at = (
+                (
+                    datetime.fromisoformat(stamp)
+                    + timedelta(seconds=retry_delay(row["attempts"]))
+                ).isoformat()
+                if status == "pending"
+                else stamp
             )
 
             result = db.execute(
@@ -118,6 +168,7 @@ def recover_stale_jobs(lease_seconds=600):
                 SET status=?,
                     error=?,
                     updated_at=?,
+                    available_at=?,
                     lease_token=NULL
                 WHERE id=?
                   AND status='running'
@@ -126,7 +177,8 @@ def recover_stale_jobs(lease_seconds=600):
                 (
                     status,
                     "Worker lease expired; job recovered.",
-                    now(),
+                    stamp,
+                    available_at,
                     row["id"],
                     cutoff,
                 ),
@@ -143,21 +195,24 @@ def claim(lease_seconds=600):
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
 
+        stamp = now()
+
         row = db.execute(
             """
             SELECT *
             FROM jobs
             WHERE status='pending'
-            ORDER BY created_at
+              AND available_at <= ?
+            ORDER BY available_at, created_at, id
             LIMIT 1
-            """
+            """,
+            (stamp,),
         ).fetchone()
 
         if row is None:
             db.commit()
             return None
 
-        stamp = now()
         token = uuid.uuid4().hex
 
         result = db.execute(
@@ -169,8 +224,9 @@ def claim(lease_seconds=600):
                 lease_token=?
             WHERE id=?
               AND status='pending'
+              AND available_at <= ?
             """,
-            (stamp, token, row["id"]),
+            (stamp, token, row["id"], stamp),
         )
 
         if result.rowcount != 1:
@@ -255,6 +311,17 @@ def fail(job, error):
         else "failed"
     )
 
+    stamp = now()
+
+    available_at = (
+        (
+            datetime.fromisoformat(stamp)
+            + timedelta(seconds=retry_delay(job["attempts"]))
+        ).isoformat()
+        if status == "pending"
+        else stamp
+    )
+
     with connect() as db:
         if job.get("lease_token"):
             cursor = db.execute(
@@ -263,6 +330,7 @@ def fail(job, error):
                 SET status=?,
                     error=?,
                     updated_at=?,
+                    available_at=?,
                     lease_token=NULL
                 WHERE id=?
                   AND status='running'
@@ -271,7 +339,8 @@ def fail(job, error):
                 (
                     status,
                     str(error)[:4000],
-                    now(),
+                    stamp,
+                    available_at,
                     job["id"],
                     job["lease_token"],
                 ),
@@ -283,6 +352,7 @@ def fail(job, error):
                 SET status=?,
                     error=?,
                     updated_at=?,
+                    available_at=?,
                     lease_token=NULL
                 WHERE id=?
                   AND status='running'
@@ -290,7 +360,8 @@ def fail(job, error):
                 (
                     status,
                     str(error)[:4000],
-                    now(),
+                    stamp,
+                    available_at,
                     job["id"],
                 ),
             )
