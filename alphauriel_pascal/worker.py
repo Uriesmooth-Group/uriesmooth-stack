@@ -15,6 +15,27 @@ logging.basicConfig(
 )
 
 
+def _maintain_lease(job, stop_event, lease_lost, interval):
+    while not stop_event.wait(interval):
+        try:
+            if not heartbeat(job["id"], job["lease_token"]):
+                lease_lost.set()
+                logging.error(
+                    "Lease lost for job %s",
+                    job["id"],
+                )
+                return
+
+        except Exception:
+            lease_lost.set()
+            logging.exception(
+                "Heartbeat failed; lease ownership is unconfirmed "
+                "for job %s",
+                job["id"],
+            )
+            return
+
+
 def process_one():
     job = claim(LEASE_SECONDS)
 
@@ -26,25 +47,9 @@ def process_one():
 
     heartbeat_interval = max(1, LEASE_SECONDS // 3)
 
-    def maintain_lease():
-        while not stop_event.wait(heartbeat_interval):
-            try:
-                if not heartbeat(job["id"], job["lease_token"]):
-                    lease_lost.set()
-                    logging.error(
-                        "Lease lost for job %s",
-                        job["id"],
-                    )
-                    return
-
-            except Exception:
-                logging.exception(
-                    "Heartbeat failed for job %s",
-                    job["id"],
-                )
-
     heartbeat_thread = threading.Thread(
-        target=maintain_lease,
+        target=_maintain_lease,
+        args=(job, stop_event, lease_lost, heartbeat_interval),
         name=f"heartbeat-{job['id'][:8]}",
         daemon=True,
     )

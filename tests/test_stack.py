@@ -295,6 +295,60 @@ def test_worker_loop_stops_after_current_iteration(monkeypatch):
     assert len(calls) == 1
 
 
+
+def test_maintain_lease_marks_lease_lost_when_heartbeat_returns_false(monkeypatch):
+    import threading
+    import alphauriel_pascal.worker as worker
+
+    job = {"id": "test-job", "lease_token": "test-token"}
+    stop_event = threading.Event()
+    lease_lost = threading.Event()
+
+    monkeypatch.setattr(worker, "heartbeat", lambda job_id, token: False)
+
+    class ImmediateEvent:
+        def wait(self, interval):
+            return False
+
+        def set(self):
+            stop_event.set()
+
+    worker._maintain_lease(
+        job,
+        ImmediateEvent(),
+        lease_lost,
+        1,
+    )
+
+    assert lease_lost.is_set()
+
+
+def test_maintain_lease_marks_lease_lost_when_heartbeat_raises(monkeypatch):
+    import threading
+    import alphauriel_pascal.worker as worker
+
+    job = {"id": "test-job", "lease_token": "test-token"}
+    lease_lost = threading.Event()
+
+    def failed_heartbeat(job_id, token):
+        raise RuntimeError("Temporary database failure")
+
+    monkeypatch.setattr(worker, "heartbeat", failed_heartbeat)
+
+    class ImmediateEvent:
+        def wait(self, interval):
+            return False
+
+    worker._maintain_lease(
+        job,
+        ImmediateEvent(),
+        lease_lost,
+        1,
+    )
+
+    assert lease_lost.is_set()
+
+
 def test_shutdown_signal_sets_stop_event():
     import threading
     import signal
