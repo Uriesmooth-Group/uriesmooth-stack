@@ -363,3 +363,31 @@ def test_shutdown_signal_sets_stop_event():
     )
 
     assert stop_event.is_set()
+
+def test_queue_stats_counts_all_job_statuses(tmp_path, monkeypatch):
+    monkeypatch.setattr(queue, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(
+        queue, "DB_PATH", tmp_path / "jobs.sqlite3"
+    )
+
+    for _ in range(4):
+        queue.enqueue("hello", {}, max_attempts=1)
+
+    jobs = [queue.claim() for _ in range(3)]
+    assert all(job is not None for job in jobs)
+
+    assert queue.finish(
+        jobs[0]["id"], {"ok": True}, jobs[0]["lease_token"]
+    ) is True
+
+    assert queue.fail(
+        jobs[1], "Intentional statistics test failure"
+    ) is True
+
+    stats = queue.queue_stats()
+
+    assert stats["pending"] == 1
+    assert stats["running"] == 1
+    assert stats["succeeded"] == 1
+    assert stats["failed"] == 1
+    assert stats["total"] == 4
