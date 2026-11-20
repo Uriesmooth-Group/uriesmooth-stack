@@ -12,3 +12,12 @@ dist/
 *.log
 secrets/
 *.sqlite3
+
+# Local recovery backups
+backups/
+
+# Temporary source recovery copies
+*.before-idempotency-context
+
+*.before-*
+*.recovery-backup

@@ -1,0 +1,68 @@
+services:
+  worker:
+    image: uriesmooth-stack:staging
+
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    init: true
+
+    restart: unless-stopped
+
+    stop_grace_period: 330s
+
+    environment:
+      ALPHAURIEL_HOME: /var/lib/uriesmooth-stack
+
+      ALPHAURIEL_POLL_SECONDS: "3"
+      ALPHAURIEL_MAX_ATTEMPTS: "3"
+      ALPHAURIEL_JOB_TIMEOUT_SECONDS: "300"
+
+      ALPHAURIEL_LEASE_SECONDS: "600"
+      ALPHAURIEL_WORKER_HEARTBEAT_SECONDS: "10"
+      ALPHAURIEL_WORKER_STALE_SECONDS: "30"
+
+      ALPHAURIEL_RETRY_BASE_SECONDS: "5"
+      ALPHAURIEL_RETRY_MAX_SECONDS: "300"
+
+      ALPHAURIEL_LOG_LEVEL: INFO
+      ALPHAURIEL_LOG_FORMAT: json
+
+    volumes:
+      - uriesmooth_stack_data:/var/lib/uriesmooth-stack
+
+    read_only: true
+
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=16m
+
+    security_opt:
+      - no-new-privileges:true
+
+    cap_drop:
+      - ALL
+
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 2.0
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - scripts/container-healthcheck.py
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  uriesmooth_stack_data:
+    name: uriesmooth-stack-data

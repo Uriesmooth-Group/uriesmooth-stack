@@ -391,3 +391,213 @@ def test_queue_stats_counts_all_job_statuses(tmp_path, monkeypatch):
     assert stats["succeeded"] == 1
     assert stats["failed"] == 1
     assert stats["total"] == 4
+
+
+def test_list_apps_skips_non_object_manifests(tmp_path, monkeypatch):
+    import alphauriel_pascal.registry as registry
+
+    app_dir = tmp_path / "invalid_manifest"
+    app_dir.mkdir()
+
+    (app_dir / "app.json").write_text(
+        "[]",
+        encoding="utf-8",
+    )
+    (app_dir / "app.py").write_text(
+        "def run(payload): return payload",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(registry, "APPS_DIR", tmp_path)
+
+    assert registry.list_apps() == []
+
+
+def test_list_apps_skips_invalid_app_names(tmp_path, monkeypatch):
+    import json
+    import alphauriel_pascal.registry as registry
+
+    for folder_name, app_name in [
+        ("numeric_name", 123),
+        ("empty_name", ""),
+        ("whitespace_name", "   "),
+    ]:
+        app_dir = tmp_path / folder_name
+        app_dir.mkdir()
+
+        (app_dir / "app.json").write_text(
+            json.dumps({"name": app_name}),
+            encoding="utf-8",
+        )
+        (app_dir / "app.py").write_text(
+            "def run(payload): return payload",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(registry, "APPS_DIR", tmp_path)
+
+    assert registry.list_apps() == []
+
+
+def test_exhausted_recovery_clears_lease_and_records_error(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(queue, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(
+        queue, "DB_PATH", tmp_path / "jobs.sqlite3"
+    )
+
+    job_id = queue.enqueue("hello", {}, max_attempts=1)
+    job = queue.claim(lease_seconds=30)
+
+    assert job["id"] == job_id
+    assert job["lease_token"]
+
+    stale_time = (
+        datetime.now(timezone.utc) - timedelta(minutes=5)
+    ).isoformat()
+
+    with queue.connect() as db:
+        db.execute(
+            "UPDATE jobs SET updated_at=? WHERE id=?",
+            (stale_time, job_id),
+        )
+
+    assert queue.recover_stale_jobs(30) == 1
+
+    with queue.connect() as db:
+        recovered = db.execute(
+            """
+            SELECT status, error, lease_token
+            FROM jobs
+            WHERE id=?
+            """,
+            (job_id,),
+        ).fetchone()
+
+    assert recovered["status"] == "failed"
+    assert recovered["error"] == (
+        "Worker lease expired; job recovered."
+    )
+    assert recovered["lease_token"] is None
+
+
+def test_queue_heartbeat_requires_current_lease_owner(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(queue, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(
+        queue, "DB_PATH", tmp_path / "jobs.sqlite3"
+    )
+
+    job_id = queue.enqueue("hello", {})
+    job = queue.claim()
+
+    assert job["id"] == job_id
+    assert queue.heartbeat(job_id, "wrong-token") is False
+    assert queue.heartbeat(job_id, job["lease_token"]) is True
+
+    assert queue.finish(
+        job_id, {"ok": True}, job["lease_token"]
+    ) is True
+
+    assert queue.heartbeat(job_id, job["lease_token"]) is False
+
+
+def test_finish_rejects_missing_and_incorrect_lease_tokens(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(queue, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(
+        queue, "DB_PATH", tmp_path / "jobs.sqlite3"
+    )
+
+    job_id = queue.enqueue("hello", {})
+    job = queue.claim()
+
+    assert queue.finish(job_id, {"ok": True}) is False
+    assert queue.finish(
+        job_id, {"ok": True}, "wrong-token"
+    ) is False
+
+    assert queue.finish(
+        job_id, {"ok": True}, job["lease_token"]
+    ) is True
+
+
+def test_fail_retries_then_marks_exhausted_job_failed(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(queue, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(
+        queue, "DB_PATH", tmp_path / "jobs.sqlite3"
+    )
+
+    job_id = queue.enqueue("hello", {}, max_attempts=2)
+
+    first = queue.claim()
+    assert first["id"] == job_id
+    assert queue.fail(first, "First failure") is True
+
+    with queue.connect() as db:
+        row = db.execute(
+            "SELECT status, error, lease_token FROM jobs WHERE id=?",
+            (job_id,),
+        ).fetchone()
+
+    assert row["status"] == "pending"
+    assert row["error"] == "First failure"
+    assert row["lease_token"] is None
+
+    with queue.connect() as db:
+        db.execute(
+            "UPDATE jobs SET available_at=? WHERE id=?",
+            (
+                (
+                    datetime.now(timezone.utc)
+                    - timedelta(seconds=1)
+                ).isoformat(),
+                job_id,
+            ),
+        )
+
+    second = queue.claim()
+    assert second["id"] == job_id
+    assert second["attempts"] == 2
+    assert queue.fail(second, "Final failure") is True
+
+    with queue.connect() as db:
+        row = db.execute(
+            "SELECT status, error, lease_token FROM jobs WHERE id=?",
+            (job_id,),
+        ).fetchone()
+
+    assert row["status"] == "failed"
+    assert row["error"] == "Final failure"
+    assert row["lease_token"] is None
+
+
+def test_list_jobs_clamps_limit_and_returns_expected_fields(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(queue, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(
+        queue, "DB_PATH", tmp_path / "jobs.sqlite3"
+    )
+
+    for number in range(3):
+        queue.enqueue("hello", {"number": number})
+
+    assert len(queue.list_jobs(limit=0)) == 1
+    assert len(queue.list_jobs(limit=2)) == 2
+
+    job = queue.list_jobs(limit=1)[0]
+
+    assert {
+        "id",
+        "app_name",
+        "status",
+        "attempts",
+        "created_at",
+        "error",
+    }.issubset(job)

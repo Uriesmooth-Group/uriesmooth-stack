@@ -4,11 +4,13 @@ import time
 
 from .config import MAX_ATTEMPTS
 from .registry import list_apps, run_app
-from .queue import enqueue, list_jobs, queue_stats
+from .queue import enqueue, list_jobs, queue_stats, system_health
 from .worker import run_worker
+from .logging_config import configure_logging
 
 
 def main():
+    configure_logging()
     parser = argparse.ArgumentParser(prog="alphauriel")
     commands = parser.add_subparsers(
         dest="command",
@@ -50,6 +52,11 @@ def main():
     commands.add_parser(
         "stats",
         help="Show queue statistics",
+    )
+
+    commands.add_parser(
+        "health",
+        help="Show platform health",
     )
 
     schedule_cmd = commands.add_parser(
@@ -108,6 +115,9 @@ def main():
             print("==========================")
             for status, total in stats.items():
                 print(f"{status.capitalize():12} {total}")
+
+        elif args.command == "health":
+            print(json.dumps(system_health(), indent=2))
 
         elif args.command == "schedule":
             if args.every < 1:

@@ -15,3 +15,13 @@ The initial runtime is Python-first and Android/Termux-compatible.
 ## Security
 
 Never commit `.env`, credentials, tokens or private keys. App code runs with the same OS permissions as the Termux user; only install trusted apps.
+
+## Job execution deadlines
+
+The worker supplies apps with a cooperative execution context containing
+a UTC deadline, remaining-time function, cancellation predicate, and
+cancellation check. Deadline expiry is handled as a job failure; lease
+loss prevents the worker from committing a result.
+
+This does not forcibly stop blocking Python code. Production hard time
+limits require process isolation and resource controls.
